@@ -23,8 +23,6 @@ All backends implement the same interface:
 from abc import ABC, abstractmethod
 from typing import Any
 
-import torch.nn as nn
-
 from vllm_omni.diffusion.data import DiffusionCacheConfig
 
 
@@ -100,13 +98,3 @@ class CacheBackend(ABC):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(config={self.config})"
-
-
-class CachedTransformer(nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.do_true_cfg = False
-
-    def __init_subclass__(cls, enable_separate_cfg: bool = True, **kwargs):
-        cls.enable_separate_cfg = enable_separate_cfg
-        super().__init_subclass__(**kwargs)

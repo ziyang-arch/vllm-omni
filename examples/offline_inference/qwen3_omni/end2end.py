@@ -6,19 +6,20 @@ with the correct prompt format on Qwen3-Omni (thinker only).
 """
 
 import os
-import time
-from typing import NamedTuple
+from pathlib import Path
+from typing import NamedTuple, Optional
 
 import librosa
 import numpy as np
 import soundfile as sf
+import torch.profiler
 from PIL import Image
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset, video_to_ndarrays
 from vllm.multimodal.image import convert_image_mode
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 from vllm_omni.entrypoints.omni import Omni
 
@@ -58,7 +59,7 @@ def get_text_query(question: str = None) -> QueryResult:
     )
 
 
-def get_video_query(question: str = None, video_path: str | None = None, num_frames: int = 16) -> QueryResult:
+def get_video_query(question: str = None, video_path: Optional[str] = None, num_frames: int = 16) -> QueryResult:
     if question is None:
         question = "Why is this video funny?"
     prompt = (
@@ -86,7 +87,7 @@ def get_video_query(question: str = None, video_path: str | None = None, num_fra
     )
 
 
-def get_image_query(question: str = None, image_path: str | None = None) -> QueryResult:
+def get_image_query(question: str = None, image_path: Optional[str] = None) -> QueryResult:
     if question is None:
         question = "What is the content of this image?"
     prompt = (
@@ -115,7 +116,7 @@ def get_image_query(question: str = None, image_path: str | None = None) -> Quer
     )
 
 
-def get_audio_query(question: str = None, audio_path: str | None = None, sampling_rate: int = 16000) -> QueryResult:
+def get_audio_query(question: str = None, audio_path: Optional[str] = None, sampling_rate: int = 16000) -> QueryResult:
     if question is None:
         question = "What is the content of this audio?"
     prompt = (
@@ -144,95 +145,113 @@ def get_audio_query(question: str = None, audio_path: str | None = None, samplin
     )
 
 
-def get_mixed_modalities_query(
-    video_path: str | None = None,
-    image_path: str | None = None,
-    audio_path: str | None = None,
-    num_frames: int = 16,
-    sampling_rate: int = 16000,
-) -> QueryResult:
-    question = "What is recited in the audio? What is the content of this image? Why is this video funny?"
-    prompt = (
-        f"<|im_start|>system\n{default_system}<|im_end|>\n"
-        "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|>"
-        "<|vision_start|><|image_pad|><|vision_end|>"
-        "<|vision_start|><|video_pad|><|vision_end|>"
-        f"{question}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
-
-    # Load video
-    if video_path:
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-        video_frames = video_to_ndarrays(video_path, num_frames=num_frames)
-    else:
-        video_frames = VideoAsset(name="baby_reading", num_frames=num_frames).np_ndarrays
-
-    # Load image
-    if image_path:
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-        pil_image = Image.open(image_path)
-        image_data = convert_image_mode(pil_image, "RGB")
-    else:
-        image_data = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
-
-    # Load audio
-    if audio_path:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        audio_signal, sr = librosa.load(audio_path, sr=sampling_rate)
-        audio_data = (audio_signal.astype(np.float32), sr)
-    else:
-        audio_data = AudioAsset("mary_had_lamb").audio_and_sample_rate
-
-    return QueryResult(
-        inputs={
-            "prompt": prompt,
-            "multi_modal_data": {
-                "audio": audio_data,
-                "image": image_data,
-                "video": video_frames,
-            },
-        },
-        limit_mm_per_prompt={"audio": 1, "image": 1, "video": 1},
-    )
-
-
-def get_multi_audios_query() -> QueryResult:
-    question = "Are these two audio clips the same?"
-    prompt = (
-        f"<|im_start|>system\n{default_system}<|im_end|>\n"
-        "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|>"
-        "<|audio_start|><|audio_pad|><|audio_end|>"
-        f"{question}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
-    return QueryResult(
-        inputs={
-            "prompt": prompt,
-            "multi_modal_data": {
-                "audio": [
-                    AudioAsset("winning_call").audio_and_sample_rate,
-                    AudioAsset("mary_had_lamb").audio_and_sample_rate,
-                ],
-            },
-        },
-        limit_mm_per_prompt={
-            "audio": 2,
-        },
-    )
-
-
 query_map = {
     "text": get_text_query,
     "use_audio": get_audio_query,
     "use_image": get_image_query,
     "use_video": get_video_query,
-    "multi_audios": get_multi_audios_query,
-    "mixed_modalities": get_mixed_modalities_query,
 }
+
+
+def _process_profiler_results(
+    profiler: torch.profiler.profile,
+    profiler_output_dir: Optional[str],
+    request_id: int = 0,
+) -> dict:
+    """
+    Process PyTorch profiler results and extract key metrics.
+
+    Args:
+        profiler: PyTorch profiler instance
+        profiler_output_dir: Directory to save profiler traces
+        request_id: Request identifier for trace file naming
+
+    Returns:
+        Dictionary with profiler statistics
+    """
+    trace_file = None
+    try:
+        # Export to Chrome trace format
+        if profiler_output_dir:
+            output_dir = Path(profiler_output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            trace_file = output_dir / f"trace_request_{request_id:05d}.json"
+            profiler.export_chrome_trace(str(trace_file))
+            print(f"  Profiler trace saved to: {trace_file}")
+
+        # Get key statistics
+        key_averages = profiler.key_averages()
+
+        # Extract CUDA kernel statistics
+        cuda_events = []
+        total_cuda_time = 0
+        total_cpu_time = 0
+
+        for event in key_averages:
+            if event.key.startswith("cuda"):
+                # FunctionEventAvg has: cuda_time, cuda_time_total, cpu_time, cpu_time_total, count
+                # cuda_time is average per call (likely self time), cuda_time_total includes children
+                # To get total self time: multiply average by count
+                avg_cuda_time = getattr(event, "cuda_time", 0) or 0
+                avg_cpu_time = getattr(event, "cpu_time", 0) or 0
+                event_count = getattr(event, "count", 1)
+
+                # Total self time = average per call * number of calls
+                cuda_time = (avg_cuda_time * event_count) / 1000.0  # Convert to ms
+                cpu_time = (avg_cpu_time * event_count) / 1000.0
+                total_cuda_time += cuda_time
+                total_cpu_time += cpu_time
+
+                cuda_events.append(
+                    {
+                        "name": event.key,
+                        "cuda_time_ms": cuda_time,
+                        "cpu_time_ms": cpu_time,
+                        "count": getattr(event, "count", 0),
+                    }
+                )
+
+        # Sort by CUDA time (descending)
+        cuda_events.sort(key=lambda x: x["cuda_time_ms"], reverse=True)
+
+        # Get top 10 most time-consuming operations
+        top_ops = cuda_events[:10]
+
+        result = {
+            "total_cuda_time_ms": total_cuda_time,
+            "total_cpu_time_ms": total_cpu_time,
+            "top_operations": [
+                {
+                    "name": op["name"],
+                    "cuda_time_ms": op["cuda_time_ms"],
+                    "cpu_time_ms": op["cpu_time_ms"],
+                    "count": op["count"],
+                }
+                for op in top_ops
+            ],
+            "total_events": len(cuda_events),
+            "trace_file": str(trace_file) if trace_file else None,
+        }
+
+        # Print summary
+        print(f"\n{'='*60}")
+        print("Profiler Summary")
+        print(f"{'='*60}")
+        print(f"Total CUDA time: {total_cuda_time:.2f}ms")
+        print(f"Total CPU time: {total_cpu_time:.2f}ms")
+        print(f"Total events: {len(cuda_events)}")
+        if top_ops:
+            print(f"\nTop 5 operations by CUDA time:")
+            for i, op in enumerate(top_ops[:5], 1):
+                print(f"  {i}. {op['name']}: {op['cuda_time_ms']:.2f}ms (count: {op['count']})")
+        print(f"{'='*60}\n")
+
+        return result
+
+    except Exception as e:
+        print(f"[Warn] Error processing profiler results: {e}")
+        return {"error": str(e), "trace_file": str(trace_file) if trace_file else None}
 
 
 def main(args):
@@ -251,14 +270,6 @@ def main(args):
         query_result = query_func(image_path=image_path)
     elif args.query_type == "use_audio":
         query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
-    elif args.query_type == "mixed_modalities":
-        query_result = query_func(
-            video_path=video_path,
-            image_path=image_path,
-            audio_path=audio_path,
-            num_frames=getattr(args, "num_frames", 16),
-            sampling_rate=getattr(args, "sampling_rate", 16000),
-        )
     else:
         query_result = query_func()
 
@@ -266,7 +277,11 @@ def main(args):
         model=model_name,
         stage_configs_path=args.stage_configs_path,
         log_stats=args.enable_stats,
-        stage_init_timeout=args.stage_init_timeout,
+        log_file=("omni_llm_pipeline.log" if args.enable_stats else None),
+        init_sleep_seconds=getattr(args, "init_sleep_seconds", 20),
+        batch_timeout=getattr(args, "batch_timeout", 5),
+        init_timeout=getattr(args, "init_timeout", 300),
+        shm_threshold_bytes=getattr(args, "shm_threshold_bytes", 65536),
     )
 
     thinker_sampling_params = SamplingParams(
@@ -315,30 +330,45 @@ def main(args):
             prompts = [get_text_query(ln).inputs for ln in lines if ln != ""]
             print(f"[Info] Loaded {len(prompts)} prompts from {args.txt_prompts}")
 
-    if args.modalities is not None:
-        output_modalities = args.modalities.split(",")
-        for i, prompt in enumerate(prompts):
-            prompt["modalities"] = output_modalities
+    # Setup profiler if enabled
+    if args.enable_profiler:
+        if not args.profiler_output_dir:
+            raise ValueError("--profiler-output-dir is required when --enable-profiler is set")
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+            on_trace_ready=None,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            with_flops=True,  # Enable FLOP counting (limited coverage: mainly matmul/conv)
+        )
+        profiler.start()
+    else:
+        profiler = None
 
-    profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
-    if profiler_enabled:
-        omni_llm.start_profile(stages=[0])
-    omni_generator = omni_llm.generate(prompts, sampling_params_list, py_generator=args.py_generator)
+    omni_outputs = omni_llm.generate(prompts, sampling_params_list)
+
+    # Stop profiler and collect results
+    if profiler:
+        profiler.stop()
+        # Process profiler results (single trace for all requests)
+        _process_profiler_results(profiler, args.profiler_output_dir, 0)
     # Determine output directory: prefer --output-dir; fallback to --output-wav
     output_dir = args.output_dir if getattr(args, "output_dir", None) else args.output_wav
     os.makedirs(output_dir, exist_ok=True)
 
-    total_requests = len(prompts)
-    processed_count = 0
-
-    for stage_outputs in omni_generator:
+    for stage_outputs in omni_outputs:
         if stage_outputs.final_output_type == "text":
             for output in stage_outputs.request_output:
-                request_id = output.request_id
+                request_id = int(output.request_id)
                 text_output = output.outputs[0].text
                 # Save aligned text file per request
-                prompt_text = output.prompt
-                out_txt = os.path.join(output_dir, f"{request_id}.txt")
+                prompt_text = prompts[request_id]["prompt"]
+                out_txt = os.path.join(output_dir, f"{request_id:05d}.txt")
                 lines = []
                 lines.append("Prompt:\n")
                 lines.append(str(prompt_text) + "\n")
@@ -352,9 +382,9 @@ def main(args):
                 print(f"Request ID: {request_id}, Text saved to {out_txt}")
         elif stage_outputs.final_output_type == "audio":
             for output in stage_outputs.request_output:
-                request_id = output.request_id
+                request_id = int(output.request_id)
                 audio_tensor = output.multimodal_output["audio"]
-                output_wav = os.path.join(output_dir, f"output_{request_id}.wav")
+                output_wav = os.path.join(output_dir, f"output_{output.request_id}.wav")
 
                 # Convert to numpy array and ensure correct format
                 audio_numpy = audio_tensor.float().detach().cpu().numpy()
@@ -366,17 +396,6 @@ def main(args):
                 # Save audio file with explicit WAV format
                 sf.write(output_wav, audio_numpy, samplerate=24000, format="WAV")
                 print(f"Request ID: {request_id}, Saved audio to {output_wav}")
-
-        processed_count += len(stage_outputs.request_output)
-        if profiler_enabled and processed_count >= total_requests:
-            print(f"[Info] Processed {processed_count}/{total_requests}. Stopping profiler inside active loop...")
-            # Stop the profiler while workers are still alive
-            omni_llm.stop_profile()
-
-            print("[Info] Waiting 30s for workers to write trace files to disk...")
-            time.sleep(30)
-            print("[Info] Trace export wait time finished.")
-    omni_llm.close()
 
 
 def parse_args():
@@ -396,10 +415,22 @@ def parse_args():
         help="Enable writing detailed statistics (default: disabled)",
     )
     parser.add_argument(
-        "--stage-init-timeout",
+        "--enable-profiler",
+        action="store_true",
+        default=False,
+        help="Enable PyTorch profiler for detailed CPU/CUDA profiling (default: disabled)",
+    )
+    parser.add_argument(
+        "--profiler-output-dir",
+        type=str,
+        default=None,
+        help="Directory to save PyTorch profiler traces (required if --enable-profiler is set)",
+    )
+    parser.add_argument(
+        "--init-sleep-seconds",
         type=int,
-        default=300,
-        help="Timeout for initializing a single stage in seconds (default: 300)",
+        default=20,
+        help="Sleep seconds after starting each stage process to allow initialization (default: 20)",
     )
     parser.add_argument(
         "--batch-timeout",
@@ -418,6 +449,12 @@ def parse_args():
         type=int,
         default=65536,
         help="Threshold for using shared memory in bytes (default: 65536)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for text and audio files (default: uses --output-wav).",
     )
     parser.add_argument(
         "--output-wav",
@@ -474,24 +511,6 @@ def parse_args():
         type=int,
         default=16000,
         help="Sampling rate for audio loading (default: 16000).",
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        default="logs",
-        help="Log directory (default: logs).",
-    )
-    parser.add_argument(
-        "--modalities",
-        type=str,
-        default=None,
-        help="Output modalities to use for the prompts.",
-    )
-    parser.add_argument(
-        "--py-generator",
-        action="store_true",
-        default=False,
-        help="Use py_generator mode. The returned type of Omni.generate() is a Python Generator object.",
     )
 
     return parser.parse_args()

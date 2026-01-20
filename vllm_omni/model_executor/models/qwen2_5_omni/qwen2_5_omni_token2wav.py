@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Iterable
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -32,7 +33,6 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_omni.model_executor.models.qwen2_5_omni.audio_length import cap_and_align_mel_length, resolve_max_mel_frames
 from vllm_omni.utils.platform_utils import is_npu
 
 
@@ -395,9 +395,9 @@ class DiTInputEmbedding(nn.Module):
         speaker_embedding: torch.Tensor,
         condition_vector: torch.Tensor,
         code_embed: torch.Tensor,
-        drop_audio_cond: bool | None = False,
-        code_embed_uncond: bool | None = None,
-        apply_cfg: bool | None = True,
+        drop_audio_cond: Optional[bool] = False,
+        code_embed_uncond: Optional[bool] = None,
+        apply_cfg: Optional[bool] = True,
     ):
         if apply_cfg:
             hidden_states = torch.cat([hidden_states, hidden_states], dim=0)
@@ -1262,24 +1262,12 @@ class Qwen2_5OmniToken2WavDiTModel(Qwen2_5OmniPreTrainedModel):
         num_steps=10,
         guidance_scale=0.5,
         sway_coefficient=-1.0,
-        max_mel_frames: int | None = None,
     ):
-        max_mel_frames = resolve_max_mel_frames(max_mel_frames, default=30000)
-        target_code_len, target_duration = cap_and_align_mel_length(
-            code_len=int(quantized_code.shape[1]),
-            repeats=int(self.repeats),
-            max_mel_frames=max_mel_frames,
-        )
-        if int(quantized_code.shape[1]) != target_code_len:
-            quantized_code = quantized_code[:, :target_code_len]
-
-        initial_state = torch.randn(
-            [1, target_duration, self.mel_dim],
-            dtype=reference_mel_spectrogram.dtype,
-            device=quantized_code.device,
-        )
+        noise_initialization = torch.randn([1, 30000, self.mel_dim], dtype=reference_mel_spectrogram.dtype)
+        maximum_duration = quantized_code.shape[1] * self.repeats
+        initial_state = noise_initialization[:, :maximum_duration].to(quantized_code.device)
         batch_size = reference_mel_spectrogram.shape[0]
-        conditioning_vector = conditioning_vector.unsqueeze(1).repeat(1, target_duration, 1)
+        conditioning_vector = conditioning_vector.unsqueeze(1).repeat(1, maximum_duration, 1)
 
         if batch_size != 1:
             raise ValueError("Only batch size = 1 is currently supported")
@@ -1294,7 +1282,6 @@ class Qwen2_5OmniToken2WavDiTModel(Qwen2_5OmniPreTrainedModel):
                     time_step=time_step,
                     drop_audio_conditioning=False,
                     drop_code=False,
-                    apply_cfg=False,
                 )
                 return prediction
 
@@ -1337,7 +1324,7 @@ class Qwen2_5OmniToken2WavDiTModel(Qwen2_5OmniPreTrainedModel):
         y0: torch.Tensor,
         num_steps: int = 10,
         guidance_scale: float = 0.5,
-        sway_coefficient: float | None = -1.0,
+        sway_coefficient: Optional[float] = -1.0,
     ) -> torch.Tensor:
         """
         Block-wise ODE sampling starting from provided initial state y0.
@@ -1475,7 +1462,6 @@ class Qwen2_5OmniToken2WavModel(Qwen2_5OmniPreTrainedModel):
         num_steps=10,
         guidance_scale=0.5,
         sway_coefficient=-1.0,
-        max_mel_frames: int | None = None,
         **kwargs,
     ):
         """Generates a waveform from input code and conditioning parameters."""
@@ -1487,7 +1473,6 @@ class Qwen2_5OmniToken2WavModel(Qwen2_5OmniPreTrainedModel):
             num_steps=num_steps,
             guidance_scale=guidance_scale,
             sway_coefficient=sway_coefficient,
-            max_mel_frames=max_mel_frames,
         ).to(self.code2wav_bigvgan_model.dtype)
 
         waveform = self.code2wav_bigvgan_model(mel_spectrogram).to(self.dtype)
@@ -1536,7 +1521,7 @@ class Qwen2_5OmniToken2WavModel(Qwen2_5OmniPreTrainedModel):
         steps: int,
         prev_generated: torch.Tensor,
         finished: bool = False,
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
         """Streaming per small chunk: returns (mel_or_None, audio_slice)."""
         start_index = max(i * self.chunk_size - self.past_cache_size, 0)
         end_index = min(
@@ -1575,9 +1560,9 @@ class Qwen2_5OmniToken2WavModel(Qwen2_5OmniPreTrainedModel):
         y_all: torch.Tensor,
         i: int,
         steps: int,
-        prev_generated: torch.Tensor | list[torch.Tensor],
+        prev_generated: Union[torch.Tensor, list[torch.Tensor]],
         finished: bool = False,
-    ) -> tuple[torch.Tensor | list[torch.Tensor], torch.Tensor]:
+    ) -> tuple[Union[torch.Tensor, list[torch.Tensor]], torch.Tensor]:
         """High-level chunk API aligning to qwen2_code2wav_dit signature."""
         if not isinstance(prev_generated, torch.Tensor):
             prev_generated = prev_generated[0] if len(prev_generated) > 0 else None
@@ -1600,7 +1585,7 @@ class Qwen2_5OmniToken2WavModel(Qwen2_5OmniPreTrainedModel):
         start_index: int,
         end_index: int,
         finished: bool,
-        prev_generated: torch.Tensor | None,
+        prev_generated: Optional[torch.Tensor],
         generated: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1686,7 +1671,7 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         num_steps: int = 10,
         guidance_scale: float = 0.5,
         sway_coefficient: float = -1.0,
-        intermediate_tensors: IntermediateTensors | None = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs,
     ) -> torch.Tensor:
         # Delegate to HF token2wav model
@@ -1700,7 +1685,7 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
             **kwargs,
         )
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
         # Token2Wav outputs waveform; logits are not applicable
         return hidden_states
 
@@ -1708,7 +1693,7 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
+    ) -> Optional[SamplerOutput]:
         return None
 
     def load_weights_without_buffers(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1797,7 +1782,7 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         )
 
     @torch.inference_mode()
-    def process_chunk_bigvgan_batch(self, mel_batch: torch.Tensor) -> torch.Tensor | None:
+    def process_chunk_bigvgan_batch(self, mel_batch: torch.Tensor) -> Optional[torch.Tensor]:
         # BigVGAN is not part of this wrapper; return None for parity.
         return None
 
@@ -1812,7 +1797,7 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         steps: int,
         prev_generated: torch.Tensor,
         finished: bool = False,
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
         mel = self.token2wav(
             code=codec_all,
             conditioning=conditioning,
@@ -1830,9 +1815,9 @@ class Qwen2_5OmniToken2WavForConditionalGenerationVLLM(nn.Module, SupportsPP):
         y_all: torch.Tensor,
         i: int,
         steps: int,
-        prev_generated: torch.Tensor | list[torch.Tensor],
+        prev_generated: Union[torch.Tensor, list[torch.Tensor]],
         finished: bool = False,
-    ) -> tuple[torch.Tensor | list[torch.Tensor], torch.Tensor]:
+    ) -> tuple[Union[torch.Tensor, list[torch.Tensor]], torch.Tensor]:
         _mel, out = self.process_little_chunk(
             conditioning=conditioning,
             reference_mel=reference_mel,

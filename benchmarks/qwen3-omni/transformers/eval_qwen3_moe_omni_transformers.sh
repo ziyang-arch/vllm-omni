@@ -16,7 +16,7 @@ if [[ ! -f "benchmarks/qwen3-omni/transformers/qwen3_omni_moe_transformers.py" ]
 else
     cd benchmarks/qwen3-omni/transformers
 
-    python qwen3_omni_moe_transformers.py --prompts_file ../../build_dataset/top100.txt --num_prompts 100
+    python qwen3_omni_moe_transformers.py --prompts_file ../../build_dataset/top10.txt --num_prompts 10
 
     echo "Logs and outputs are saved to $(pwd)/benchmark_results:"
     echo "  - perf_stats.json    Aggregated/per-prompt TPS and latency (thinker/talker/code2wav/overall)"

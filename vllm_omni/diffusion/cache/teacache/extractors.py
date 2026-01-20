@@ -13,9 +13,8 @@ all model-specific information needed for generic caching, including preprocessi
 transformer execution, and postprocessing logic.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Union
 
 import torch
 import torch.nn as nn
@@ -147,11 +146,10 @@ def extract_qwen_context(
     hidden_states: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
     encoder_hidden_states_mask: torch.Tensor,
-    timestep: torch.Tensor | float | int,
+    timestep: Union[torch.Tensor, float, int],
     img_shapes: torch.Tensor,
     txt_seq_lens: torch.Tensor,
     guidance: torch.Tensor | None = None,
-    additional_t_cond: torch.Tensor | None = None,
     attention_kwargs: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> CacheContext:
@@ -171,7 +169,6 @@ def extract_qwen_context(
         img_shapes: Image shapes for position embedding
         txt_seq_lens: Text sequence lengths
         guidance: Optional guidance scale for CFG
-        additional_t_cond: Optional additional timestep conditioning
         attention_kwargs: Additional attention arguments
         **kwargs: Additional keyword arguments ignored by this extractor
 
@@ -195,9 +192,9 @@ def extract_qwen_context(
         guidance = guidance.to(hidden_states.dtype) * 1000
 
     temb = (
-        module.time_text_embed(timestep, hidden_states, additional_t_cond)
+        module.time_text_embed(timestep, hidden_states)
         if guidance is None
-        else module.time_text_embed(timestep, guidance, hidden_states, additional_t_cond)
+        else module.time_text_embed(timestep, guidance, hidden_states)
     )
 
     image_rotary_emb = module.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
@@ -208,7 +205,8 @@ def extract_qwen_context(
     block = module.transformer_blocks[0]
     img_mod_params = block.img_mod(temb)
     img_mod1, _ = img_mod_params.chunk(2, dim=-1)
-    img_modulated, _ = block.img_norm1(hidden_states, img_mod1)
+    img_normed = block.img_norm1(hidden_states)
+    img_modulated, _ = block._modulate(img_normed, img_mod1)
 
     # ============================================================================
     # DEFINE TRANSFORMER EXECUTION (Qwen-specific)
@@ -255,20 +253,20 @@ def extract_qwen_context(
 
 
 # Registry for model-specific extractors
-# Key: Transformer class name
+# Key: Pipeline class name (from OmniDiffusionConfig.model_class_name)
 # Value: extractor function with signature (module, *args, **kwargs) -> CacheContext
 #
-# Note: Use the transformer class name as specified in pipelines as TeaCache hooks operate
-# on the transformer module and multiple pipelines can share the same transformer.
+# Note: Use the exact pipeline class name as specified in OmniDiffusionConfig.model_class_name
+# to ensure consistent lookup without substring matching.
 EXTRACTOR_REGISTRY: dict[str, Callable] = {
-    "QwenImageTransformer2DModel": extract_qwen_context,
+    "QwenImagePipeline": extract_qwen_context,
     # Future models:
-    # "FluxTransformer2DModel": extract_flux_context,
-    # "CogVideoXTransformer3DModel": extract_cogvideox_context,
+    # "FluxPipeline": extract_flux_context,
+    # "CogVideoXPipeline": extract_cogvideox_context,
 }
 
 
-def register_extractor(transformer_cls_name: str, extractor_fn: Callable) -> None:
+def register_extractor(model_identifier: str, extractor_fn: Callable) -> None:
     """
     Register a new extractor function for a model type.
 
@@ -276,7 +274,7 @@ def register_extractor(transformer_cls_name: str, extractor_fn: Callable) -> Non
     the core TeaCache code.
 
     Args:
-        transformer_cls_name: Transformer model type identifier (class name or type string)
+        model_identifier: Model type identifier (class name or type string)
         extractor_fn: Function with signature (module, *args, **kwargs) -> CacheContext
 
     Example:
@@ -298,19 +296,19 @@ def register_extractor(transformer_cls_name: str, extractor_fn: Callable) -> Non
         ...     return CacheContext(modulated, hidden_states, None, temb, run_blocks, postprocess)
         >>> register_extractor("FluxTransformer2DModel", extract_flux_context)
     """
-    EXTRACTOR_REGISTRY[transformer_cls_name] = extractor_fn
+    EXTRACTOR_REGISTRY[model_identifier] = extractor_fn
 
 
-def get_extractor(transformer_cls_name: str) -> Callable:
+def get_extractor(model_type: str) -> Callable:
     """
-    Get extractor function for given transformer class.
+    Get extractor function for given model type.
 
-    This function looks up the extractor based on the exact transformer_cls_name string,
-    which should match the transformer type in the pipeline (i.e., pipeline.transformer.__class__.__name__).
+    This function looks up the extractor based on the exact model_type string,
+    which should match the pipeline class name from OmniDiffusionConfig.model_class_name.
 
     Args:
-        transformer_cls_name: Transformer class name (e.g., "QwenImageTransformer2DModel")
-                                Must exactly match a key in EXTRACTOR_REGISTRY.
+        model_type: Model type string (e.g., "QwenImagePipeline", "FluxPipeline")
+                   Must exactly match a key in EXTRACTOR_REGISTRY.
 
     Returns:
         Extractor function with signature (module, *args, **kwargs) -> CacheContext
@@ -319,18 +317,18 @@ def get_extractor(transformer_cls_name: str) -> Callable:
         ValueError: If model type not found in registry
 
     Example:
-        >>> # Get extractor for QwenImageTransformer2DModel
-        >>> extractor = get_extractor("QwenImageTransformer2DModel")
+        >>> # Get extractor for Qwen model
+        >>> extractor = get_extractor("QwenImagePipeline")
         >>> ctx = extractor(transformer, hidden_states, encoder_hidden_states, timestep, ...)
     """
     # Direct lookup - no substring matching
-    if transformer_cls_name in EXTRACTOR_REGISTRY:
-        return EXTRACTOR_REGISTRY[transformer_cls_name]
+    if model_type in EXTRACTOR_REGISTRY:
+        return EXTRACTOR_REGISTRY[model_type]
 
     # No match found
     available_types = list(EXTRACTOR_REGISTRY.keys())
     raise ValueError(
-        f"Unknown model type: '{transformer_cls_name}'. "
+        f"Unknown model type: '{model_type}'. "
         f"Available types: {available_types}\n"
         f"To add support for a new model, use register_extractor() or add to EXTRACTOR_REGISTRY."
     )

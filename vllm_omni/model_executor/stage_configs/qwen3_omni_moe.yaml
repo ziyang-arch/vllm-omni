@@ -6,7 +6,6 @@
 # The following config has been verified on 2x H100-80G GPUs.
 stage_args:
   - stage_id: 0
-    stage_type: llm  # Use llm stage type to launch OmniLLM
     runtime:
       devices: "0,1"
       max_batch_size: 1
@@ -16,7 +15,7 @@ stage_args:
       worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       gpu_memory_utilization: 0.6
-      enforce_eager: false
+      enforce_eager: true
       trust_remote_code: true
       engine_output_type: latent  # Output hidden states for talker
       distributed_executor_backend: "mp"
@@ -37,7 +36,6 @@ stage_args:
       repetition_penalty: 1.05
 
   - stage_id: 1
-    stage_type: llm  # Use llm stage type to launch OmniLLM
     runtime:
       devices: "1"
       max_batch_size: 1
@@ -47,7 +45,7 @@ stage_args:
       worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       gpu_memory_utilization: 0.3
-      enforce_eager: false
+      enforce_eager: true
       trust_remote_code: true
       engine_output_type: latent  # Output codec codes for code2wav
       # tensor_parallel_size: 2
@@ -69,7 +67,6 @@ stage_args:
       stop_token_ids: [2150]
 
   - stage_id: 2
-    stage_type: llm  # Use llm stage type to launch OmniLLM
     runtime:
       devices: "0"
       max_batch_size: 1

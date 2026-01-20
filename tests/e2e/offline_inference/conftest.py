@@ -11,7 +11,6 @@ from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.sampling_params import SamplingParams
 
 from vllm_omni.entrypoints.omni import Omni
-from vllm_omni.outputs import OmniRequestOutput
 
 PromptAudioInput = list[tuple[Any, int]] | tuple[Any, int] | None
 PromptImageInput = list[Any] | Any | None
@@ -27,7 +26,7 @@ class OmniRunner:
         self,
         model_name: str,
         seed: int = 42,
-        stage_init_timeout: int = 300,
+        init_sleep_seconds: int = 20,
         batch_timeout: int = 10,
         init_timeout: int = 300,
         shm_threshold_bytes: int = 65536,
@@ -41,7 +40,7 @@ class OmniRunner:
         Args:
             model_name: The model name or path
             seed: Random seed for reproducibility
-            stage_init_timeout: Timeout for initializing a single stage in seconds
+            init_sleep_seconds: Sleep time after starting each stage
             batch_timeout: Timeout for batching in seconds
             init_timeout: Timeout for initializing stages in seconds
             shm_threshold_bytes: Threshold for using shared memory
@@ -55,7 +54,7 @@ class OmniRunner:
         self.omni = Omni(
             model=model_name,
             log_stats=log_stats,
-            stage_init_timeout=stage_init_timeout,
+            init_sleep_seconds=init_sleep_seconds,
             batch_timeout=batch_timeout,
             init_timeout=init_timeout,
             shm_threshold_bytes=shm_threshold_bytes,
@@ -70,7 +69,7 @@ class OmniRunner:
         Returns:
             List of SamplingParams with default decoding for each stage
         """
-        return [st.default_sampling_params for st in self.omni.stage_list]
+        return [st.default_sampling_params for st in self.omni.instance.stage_list]
 
     def get_omni_inputs(
         self,
@@ -80,7 +79,6 @@ class OmniRunner:
         images: PromptImageInput = None,
         videos: PromptVideoInput = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        modalities: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Construct Omni input format from prompts and multimodal data.
@@ -177,8 +175,6 @@ class OmniRunner:
             input_dict: dict[str, Any] = {"prompt": full_prompt}
             if multi_modal_data:
                 input_dict["multi_modal_data"] = multi_modal_data
-            if modalities:
-                input_dict["modalities"] = modalities
             if mm_processor_kwargs:
                 input_dict["mm_processor_kwargs"] = mm_processor_kwargs
 
@@ -190,7 +186,7 @@ class OmniRunner:
         self,
         prompts: list[dict[str, Any]],
         sampling_params_list: list[SamplingParams] | None = None,
-    ) -> list[OmniRequestOutput]:
+    ) -> list[Any]:
         """
         Generate outputs for the given prompts.
 
@@ -217,8 +213,7 @@ class OmniRunner:
         images: PromptImageInput = None,
         videos: PromptVideoInput = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        modalities: list[str] | None = None,
-    ) -> list[OmniRequestOutput]:
+    ) -> list[Any]:
         """
         Convenience method to generate with multimodal inputs.
 
@@ -241,7 +236,6 @@ class OmniRunner:
             images=images,
             videos=videos,
             mm_processor_kwargs=mm_processor_kwargs,
-            modalities=modalities,
         )
         return self.generate(omni_inputs, sampling_params_list)
 
@@ -252,7 +246,7 @@ class OmniRunner:
         system_prompt: str | None = None,
         audios: PromptAudioInput = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[OmniRequestOutput]:
+    ) -> list[Any]:
         """
         Convenience method to generate with multimodal inputs.
         Args:
@@ -279,7 +273,7 @@ class OmniRunner:
         system_prompt: str | None = None,
         videos: PromptVideoInput = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[OmniRequestOutput]:
+    ) -> list[Any]:
         """
         Convenience method to generate with multimodal inputs.
         Args:
@@ -306,7 +300,7 @@ class OmniRunner:
         system_prompt: str | None = None,
         images: PromptImageInput = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[OmniRequestOutput]:
+    ) -> list[Any]:
         """
         Convenience method to generate with multimodal inputs.
         Args:
@@ -338,8 +332,8 @@ class OmniRunner:
 
     def close(self):
         """Close and cleanup the Omni instance."""
-        if hasattr(self.omni, "close"):
-            self.omni.close()
+        if hasattr(self.omni.instance, "close"):
+            self.omni.instance.close()
 
 
 @pytest.fixture(scope="session")

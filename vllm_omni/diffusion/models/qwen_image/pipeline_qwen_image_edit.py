@@ -7,7 +7,7 @@ import logging
 import math
 import os
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Optional, Union
 
 import numpy as np
 import PIL.Image
@@ -25,14 +25,8 @@ from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwe
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.parallel_state import (
-    get_cfg_group,
-    get_classifier_free_guidance_rank,
-    get_classifier_free_guidance_world_size,
-)
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
-from vllm_omni.diffusion.models.interface import SupportImageInput
 from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image import calculate_shift
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenImageTransformer2DModel,
@@ -140,10 +134,10 @@ def calculate_dimensions(target_area: float, ratio: float):
 
 def retrieve_timesteps(
     scheduler,
-    num_inference_steps: int | None = None,
-    device: str | torch.device | None = None,
-    timesteps: list[int] | None = None,
-    sigmas: list[float] | None = None,
+    num_inference_steps: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    timesteps: Optional[list[int]] = None,
+    sigmas: Optional[list[float]] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, int]:
     r"""
@@ -179,7 +173,7 @@ def retrieve_timesteps(
 
 
 def retrieve_latents(
-    encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "argmax"
+    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "argmax"
 ):
     """Retrieve latents from VAE encoder output."""
     if hasattr(encoder_output, "latent_dist"):
@@ -196,7 +190,6 @@ def retrieve_latents(
 
 class QwenImageEditPipeline(
     nn.Module,
-    SupportImageInput,
 ):
     def __init__(
         self,
@@ -312,9 +305,9 @@ class QwenImageEditPipeline(
 
     def _get_qwen_prompt_embeds(
         self,
-        prompt: str | list[str] = None,
-        image: torch.Tensor | None = None,
-        dtype: torch.dtype | None = None,
+        prompt: Union[str, list[str]] = None,
+        image: Optional[torch.Tensor] = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         dtype = dtype or self.text_encoder.dtype
 
@@ -357,9 +350,9 @@ class QwenImageEditPipeline(
 
     def _get_qwen_prompt_embeds(
         self,
-        prompt: str | list[str] = None,
-        image: PIL.Image.Image | torch.Tensor | None = None,
-        dtype: torch.dtype | None = None,
+        prompt: Union[str, list[str]] = None,
+        image: Optional[Union[PIL.Image.Image, torch.Tensor]] = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         """Get prompt embeddings with image support for editing."""
         dtype = dtype or self.text_encoder.dtype
@@ -404,11 +397,11 @@ class QwenImageEditPipeline(
 
     def encode_prompt(
         self,
-        prompt: str | list[str],
-        image: torch.Tensor | None = None,
+        prompt: Union[str, list[str]],
+        image: Optional[torch.Tensor] = None,
         num_images_per_prompt: int = 1,
-        prompt_embeds: torch.Tensor | None = None,
-        prompt_embeds_mask: torch.Tensor | None = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_mask: Optional[torch.Tensor] = None,
         max_sequence_length: int = 1024,
     ):
         r"""
@@ -608,109 +601,61 @@ class QwenImageEditPipeline(
             if image_latents is not None:
                 latent_model_input = torch.cat([latents, image_latents], dim=1)
 
-            self.transformer.do_true_cfg = do_true_cfg  # used in teacache hook
-            cfg_parallel_ready = do_true_cfg and get_classifier_free_guidance_world_size() > 1
+            noise_pred = self.transformer(
+                hidden_states=latent_model_input,
+                timestep=timestep / 1000,
+                guidance=guidance,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                encoder_hidden_states=prompt_embeds,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                attention_kwargs=self.attention_kwargs,
+                return_dict=False,
+            )[0]
+            noise_pred = noise_pred[:, : latents.size(1)]
 
-            if cfg_parallel_ready:
-                cfg_group = get_cfg_group()
-                cfg_rank = get_classifier_free_guidance_rank()
-
-                if cfg_rank == 0:
-                    local_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=prompt_embeds_mask,
-                        encoder_hidden_states=prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                else:
-                    local_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=negative_txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-
-                local_pred = local_pred[:, : latents.size(1)]
-
-                gathered = cfg_group.all_gather(local_pred, separate_tensors=True)
-                if cfg_rank == 0:
-                    noise_pred = gathered[0]
-                    neg_noise_pred = gathered[1]
-                    comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-                    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                    noise_pred = comb_pred * (cond_norm / noise_norm)
-                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                cfg_group.broadcast(latents, src=0)
-
-            else:
-                # Forward pass for positive prompt (or unconditional if no CFG)
-                noise_pred = self.transformer(
+            if do_true_cfg:
+                neg_noise_pred = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep / 1000,
                     guidance=guidance,
-                    encoder_hidden_states_mask=prompt_embeds_mask,
-                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                    encoder_hidden_states=negative_prompt_embeds,
                     img_shapes=img_shapes,
-                    txt_seq_lens=txt_seq_lens,
+                    txt_seq_lens=negative_txt_seq_lens,
                     attention_kwargs=self.attention_kwargs,
                     return_dict=False,
                 )[0]
-                noise_pred = noise_pred[:, : latents.size(1)]
-
-                # Forward pass for negative prompt (CFG)
-                if do_true_cfg:
-                    neg_noise_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=negative_txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                    neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
-                    comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-                    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                    noise_pred = comb_pred * (cond_norm / noise_norm)
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
+                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                noise_pred = comb_pred * (cond_norm / noise_norm)
+            # compute the previous noisy sample x_t -> x_t-1
+            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
         return latents
 
     def forward(
         self,
         req: OmniDiffusionRequest,
-        prompt: str | list[str] = "",
-        negative_prompt: str | list[str] = "",
-        image: PIL.Image.Image | torch.Tensor | None = None,
+        prompt: Union[str, list[str]] = "",
+        negative_prompt: Union[str, list[str]] = "",
+        image: Optional[Union[PIL.Image.Image, torch.Tensor]] = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
         width: int | None = None,
         num_inference_steps: int = 50,
-        sigmas: list[float] | None = None,
+        sigmas: Optional[list[float]] = None,
         guidance_scale: float = 1.0,
         num_images_per_prompt: int = 1,
-        generator: torch.Generator | list[torch.Generator] | None = None,
-        latents: torch.Tensor | None = None,
-        prompt_embeds: torch.Tensor | None = None,
-        prompt_embeds_mask: torch.Tensor | None = None,
-        negative_prompt_embeds: torch.Tensor | None = None,
-        negative_prompt_embeds_mask: torch.Tensor | None = None,
-        output_type: str | None = "pil",
-        attention_kwargs: dict[str, Any] | None = None,
+        generator: Optional[Union[torch.Generator, list[torch.Generator]]] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_mask: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_mask: Optional[torch.Tensor] = None,
+        output_type: Optional[str] = "pil",
+        attention_kwargs: Optional[dict[str, Any]] = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
     ) -> DiffusionOutput:

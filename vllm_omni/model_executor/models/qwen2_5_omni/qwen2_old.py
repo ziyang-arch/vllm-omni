@@ -1,12 +1,10 @@
 from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import Qwen2Config
-from vllm.attention.backends.abstract import (
-    AttentionType,
-)
-from vllm.attention.layer import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -45,7 +43,7 @@ class Qwen2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -82,10 +80,10 @@ class Qwen2Attention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
-        head_dim: int | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        rope_scaling: tuple | None = None,
+        head_dim: Optional[int] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        rope_scaling: Optional[tuple] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -128,15 +126,12 @@ class Qwen2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rotary_pos_emb = get_rope(
-            head_size=self.head_dim,
+        self.rotary_emb = get_rope(
+            self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            is_neox_style=True,
-            rope_parameters={
-                "base": self.rope_theta,
-                **rope_scaling,
-            },
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.attn = Attention(
             self.num_heads,
@@ -156,7 +151,7 @@ class Qwen2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_pos_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -166,8 +161,8 @@ class Qwen2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -212,7 +207,7 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
+        residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -300,21 +295,21 @@ class Qwen2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.embed_input_ids(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -426,23 +421,23 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -450,7 +445,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput | None:
+    ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -508,7 +503,7 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         return self.model(input_ids, positions, intermediate_tensors)
 
@@ -516,7 +511,7 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput | None:
+    ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

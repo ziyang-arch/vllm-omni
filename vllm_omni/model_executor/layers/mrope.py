@@ -1,4 +1,5 @@
 import itertools
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -49,11 +50,11 @@ class MRotaryEmbedding(RotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: list[int] | None = None,
+        mrope_section: Optional[list[int]] = None,
         mrope_interleaved: bool = False,
         # YaRN parameters.
         *,
-        scaling_factor: float | None = None,
+        scaling_factor: Optional[float] = None,
         extrapolation_factor: float = 1,
         attn_factor: float = 1,
         beta_fast: int = 32,
@@ -84,8 +85,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward().
 
         Args:
@@ -137,12 +138,12 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]],
         context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
         use_audio_in_video: bool = False,
     ) -> tuple[list[list[int]], int]:
         """Get mrope input positions and delta value."""
@@ -170,12 +171,12 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
         second_per_grid_ts: list[float],
         context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         from vllm.transformers_utils.config import thinker_uses_mrope
@@ -217,10 +218,10 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
         context_len: int = 0,
-        seq_len: int | None = None,
+        seq_len: Optional[int] = None,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value for GLM4V."""
 
@@ -318,11 +319,11 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
         second_per_grid_ts: list[float],
         context_len: int = 0,
-        seq_len: int | None = None,
+        seq_len: Optional[int] = None,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value."""
 
@@ -416,12 +417,12 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        second_per_grid_ts: Optional[list[float]] = None,
         context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value (Qwen2.5-Omni version).
@@ -641,7 +642,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         cls,
         thinker_config: PretrainedConfig,
         audio_len: int,
-        video_grid_thw: list[int] | torch.Tensor,
+        video_grid_thw: Union[list[int], torch.Tensor],
         video_second_per_grid_t: float,
     ) -> list[int]:
         """Get video prompt updates when `use_audio_in_video` is True.

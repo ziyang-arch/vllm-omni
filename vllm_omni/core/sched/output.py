@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.request import Request
@@ -20,16 +21,15 @@ class OmniNewRequestData(NewRequestData):
     """
 
     # Optional serialized prompt embeddings
-    prompt_embeds: PromptEmbedsPayload | None = None
+    prompt_embeds: Optional[PromptEmbedsPayload] = None
     # Optional serialized additional information
-    additional_information: AdditionalInformationPayload | None = None
+    additional_information: Optional[AdditionalInformationPayload] = None
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
     ) -> "OmniNewRequestData":
         """Create OmniNewRequestData from a Request object.
 
@@ -50,6 +50,5 @@ class OmniNewRequestData(NewRequestData):
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
-            prefill_token_ids=prefill_token_ids,
             additional_information=request.additional_information,
         )

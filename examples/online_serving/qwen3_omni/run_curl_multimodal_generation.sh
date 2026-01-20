@@ -4,18 +4,14 @@ set -euo pipefail
 # Default query type
 QUERY_TYPE="${1:-use_video}"
 
-# Default modalities argument
-MODALITIES="${2:-null}"
-
 # Validate query type
 if [[ ! "$QUERY_TYPE" =~ ^(text|use_audio|use_image|use_video)$ ]]; then
     echo "Error: Invalid query type '$QUERY_TYPE'"
-    echo "Usage: $0 [text|use_audio|use_image|use_video] [modalities]"
+    echo "Usage: $0 [text|use_audio|use_image|use_video]"
     echo "  text: Text query"
     echo "  use_audio: Audio + Text query"
     echo "  use_image: Image + Text query"
     echo "  use_video: Video + Text query"
-    echo "  modalities: Modalities parameter (default: null)"
     exit 1
 fi
 
@@ -146,7 +142,6 @@ output=$(curl -sS -X POST http://localhost:8091/v1/chat/completions \
   "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
   "sampling_params_list": $sampling_params_list,
   "mm_processor_kwargs": $mm_processor_kwargs,
-  "modalities": $MODALITIES,
   "messages": [
     {
       "role": "system",

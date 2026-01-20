@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from .logging import get_connector_logger
 
@@ -28,9 +28,9 @@ class OmniTransferConfig:
 
     # Direct mapping: (from_stage, to_stage) -> connector
     connectors: dict[tuple[str, str], ConnectorSpec] = field(default_factory=dict)
-    default_connector: ConnectorSpec | None = None
+    default_connector: Optional[ConnectorSpec] = None
 
-    def get_connector_for_edge(self, from_stage: str, to_stage: str) -> ConnectorSpec | None:
+    def get_connector_for_edge(self, from_stage: str, to_stage: str) -> Optional[ConnectorSpec]:
         """Get connector spec for a specific edge."""
         edge_key = (from_stage, to_stage)
         return self.connectors.get(edge_key, self.default_connector)

@@ -18,7 +18,7 @@ else
     log_dir=benchmarks/qwen3-omni/vllm_omni/logs
     outputs_dir=benchmarks/qwen3-omni/vllm_omni/outputs
     end2end_script_path=examples/offline_inference/qwen3_omni/end2end.py
-    build_dataset_path=benchmarks/build_dataset/top100.txt
+    build_dataset_path=benchmarks/build_dataset/top10.txt
 
     python $end2end_script_path --output-wav $outputs_dir \
                       --query-type text \

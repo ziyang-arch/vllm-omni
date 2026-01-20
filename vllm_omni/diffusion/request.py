@@ -66,18 +66,6 @@ class OmniDiffusionRequest:
     seed: int | None = None
     seeds: list[int] | None = None
 
-    # layered info
-    layers: int = 4
-
-    # cfg info
-    cfg_normalize: bool = False
-
-    # caption language
-    use_en_prompt: bool = False
-
-    # different bucket in (640, 1024) to determine the condition and output resolution
-    resolution: int = 640
-
     # Tracking if embeddings are already processed
     is_prompt_processed: bool = False
 
@@ -109,7 +97,6 @@ class OmniDiffusionRequest:
     # Scheduler parameters
     num_inference_steps: int = 50
     guidance_scale: float = 1.0
-    guidance_scale_provided: bool = False
     guidance_scale_2: float | None = None
     guidance_rescale: float = 0.0
     eta: float = 0.0

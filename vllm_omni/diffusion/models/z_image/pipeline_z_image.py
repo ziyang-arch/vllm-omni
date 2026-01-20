@@ -18,8 +18,8 @@
 import inspect
 import json
 import os
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn

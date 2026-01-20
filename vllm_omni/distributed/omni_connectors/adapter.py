@@ -4,10 +4,7 @@
 # and vllm_omni.entrypoints.omni_llm.py
 
 import time
-from collections.abc import Callable
-from typing import Any
-
-from vllm_omni.entrypoints.stage_utils import OmniStageTaskType
+from typing import Any, Callable, Optional
 
 from .utils.logging import get_connector_logger
 
@@ -51,7 +48,6 @@ def try_send_via_connector(
         if success:
             # Send lightweight notification via queue
             notify_payload = {
-                "type": OmniStageTaskType.GENERATE,
                 "request_id": req_id,
                 "sampling_params": sampling_params,
                 "from_connector": True,
@@ -94,7 +90,7 @@ def try_recv_via_connector(
     task: dict[str, Any],
     connectors: dict[Any, Any],
     stage_id: int,
-) -> tuple[Any, dict[str, Any] | None]:
+) -> tuple[Any, Optional[dict[str, Any]]]:
     """
     Attempts to resolve input data from either connector or IPC.
     Returns (engine_inputs, rx_metrics) or (None, None) if failed/skipped.

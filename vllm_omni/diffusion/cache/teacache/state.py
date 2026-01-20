@@ -7,6 +7,8 @@ TeaCache state management.
 This module manages the state for TeaCache hooks across diffusion timesteps.
 """
 
+from typing import Optional
+
 import torch
 
 
@@ -25,9 +27,9 @@ class TeaCacheState:
 
         # Caching state
         self.accumulated_rel_l1_distance = 0.0
-        self.previous_modulated_input: torch.Tensor | None = None
-        self.previous_residual: torch.Tensor | None = None
-        self.previous_residual_encoder: torch.Tensor | None = None
+        self.previous_modulated_input: Optional[torch.Tensor] = None
+        self.previous_residual: Optional[torch.Tensor] = None
+        self.previous_residual_encoder: Optional[torch.Tensor] = None
 
     def reset(self) -> None:
         """Reset all state variables for a new inference run."""
