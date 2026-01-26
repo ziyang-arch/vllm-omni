@@ -41,9 +41,9 @@ else
         --sample=cpu \
         --trace=cuda,osrt,nvtx \
         --cuda-memory-usage=true \
-        python qwen3_omni_moe_transformers_profile.py \
+        python qwen3_omni_moe_transformers.py \
             --prompts_file ../../build_dataset/top1.txt \
-            --num_prompts 10
+            --num_prompts 1
 
     echo ""
     echo "Logs and outputs are saved to $(pwd)/benchmark_results:"
