@@ -24,18 +24,19 @@ echo "nsys output file: ${NSYS_OUTPUT}.qdrep"
 NSYS_GPU_METRICS="${NSYS_GPU_METRICS:-0}"
 GPU_METRICS_OPT=""
 if [[ "$NSYS_GPU_METRICS" == "1" ]]; then
-    GPU_METRICS_OPT="--gpu-metrics-device=all"
+    GPU_METRICS_OPT="--gpu-metrics-devices=all"
     echo "NSYS_GPU_METRICS=1 -> enabling GPU metrics (${GPU_METRICS_OPT})"
 else
     echo "NSYS_GPU_METRICS=0 -> GPU metrics disabled (avoids ERR_NVGPUCTRPERM failures)"
 fi
 
-#--gpu-metrics-device=all
 
 
-nsys profile \
+
+sudo -E env "PATH=$PATH" nsys profile \
         -o "$NSYS_OUTPUT" \
         --force-overwrite=true \
+        --gpu-metrics-devices=all \
         --sample=cpu \
         --trace=cuda,osrt,nvtx \
         --cuda-memory-usage=true \
