@@ -470,6 +470,11 @@ class OmniStage:
             "final_output": self.final_output,
             "final_output_type": self.final_output_type,
         }
+        if os.environ.get("DVFS_ENABLED", "0") == "1":
+            from vllm_omni.core.dvfs_controller import get_or_create_dvfs_shared
+
+            gpu_id = int(runtime_cfg.get("devices", "0").split(",")[0])
+            stage_payload["dvfs_shared"] = get_or_create_dvfs_shared(gpu_id, ctx)
         try:
             old_env = os.environ.get("VLLM_LOGGING_PREFIX")
             new_env = f"[Stage-{self.stage_id}] {'' if old_env is None else old_env}"
@@ -770,6 +775,26 @@ def _stage_worker(
     except Exception as e:
         logger.warning("Device setup failed: %s", e)
 
+    # Co-Location DVFS scheduler (no-op when DVFS_ENABLED != "1")
+    dvfs = None
+    dvfs_shared = stage_payload.get("dvfs_shared")
+    if dvfs_shared and _os.environ.get("DVFS_ENABLED", "0") == "1":
+        try:
+            from vllm_omni.core.dvfs_controller import CoLocationDVFSScheduler
+
+            _gpu_id = int(runtime_cfg.get("devices", "0").split(",")[0])
+            dvfs = CoLocationDVFSScheduler(
+                gpu_id=_gpu_id,
+                min_freq=int(_os.environ.get("DVFS_MIN_FREQ_MHZ", "210")),
+                max_freq=int(_os.environ.get("DVFS_MAX_FREQ_MHZ", "2520")),
+                shared_counter=dvfs_shared["counter"],
+                shared_lock=dvfs_shared["lock"],
+                stage_id=stage_id,
+            )
+            logger.info("[Stage-%s] DVFS scheduler active on GPU %d", stage_id, _gpu_id)
+        except Exception as exc:
+            logger.warning("[Stage-%s] DVFS init failed: %s — continuing without DVFS", stage_id, exc)
+
     # Use sequential init locks only when NVML is unavailable
     with _sequential_init_lock(engine_args, stage_init_timeout):
         # Init engine based on stage_type
@@ -821,6 +846,9 @@ def _stage_worker(
     max_batch_size = int(runtime_cfg.get("max_batch_size", 1) or 1)
     logger.info(f"Max batch size: {max_batch_size}")
 
+    if dvfs:
+        dvfs.stage_wakeup()
+
     def handle_profiler_task_local(task_type: OmniStageTaskType) -> dict:
         """Handle profiler task locally in the worker process."""
         if task_type == OmniStageTaskType.PROFILER_START:
@@ -862,12 +890,18 @@ def _stage_worker(
 
     # Batch processing loop
     while True:
+        if dvfs:
+            dvfs.stage_sleep()
         task = in_q.get()
+        if dvfs:
+            dvfs.stage_wakeup()
 
         _recv_dequeue_ts = _time.time()
         task_type = task.get("type", OmniStageTaskType.GENERATE)
         if task_type == OmniStageTaskType.SHUTDOWN:
             logger.info("Received shutdown signal")
+            if dvfs:
+                dvfs.cleanup()
             break
 
         # Handle profiler control commands
@@ -1180,6 +1214,26 @@ async def _stage_worker_async(
     except Exception as e:
         logger.warning("Device setup failed: %s", e)
 
+    # Co-Location DVFS scheduler (no-op when DVFS_ENABLED != "1")
+    dvfs = None
+    dvfs_shared = stage_payload.get("dvfs_shared")
+    if dvfs_shared and _os.environ.get("DVFS_ENABLED", "0") == "1":
+        try:
+            from vllm_omni.core.dvfs_controller import CoLocationDVFSScheduler
+
+            _gpu_id = int(runtime_cfg.get("devices", "0").split(",")[0])
+            dvfs = CoLocationDVFSScheduler(
+                gpu_id=_gpu_id,
+                min_freq=int(_os.environ.get("DVFS_MIN_FREQ_MHZ", "210")),
+                max_freq=int(_os.environ.get("DVFS_MAX_FREQ_MHZ", "2520")),
+                shared_counter=dvfs_shared["counter"],
+                shared_lock=dvfs_shared["lock"],
+                stage_id=stage_id,
+            )
+            logger.info("[Stage-%s] DVFS scheduler active on GPU %d (async)", stage_id, _gpu_id)
+        except Exception as exc:
+            logger.warning("[Stage-%s] DVFS init failed: %s — continuing without DVFS", stage_id, exc)
+
     # Initialize OmniConnectors if configured to match sync worker behavior
     connectors: dict[Any, Any] = {}
     if connectors_config:
@@ -1390,12 +1444,20 @@ async def _stage_worker_async(
             )
 
     _batch_gen_t0 = _time.time()
+    _dvfs_idle = False
+    if dvfs:
+        dvfs.stage_wakeup()
     while True:
         try:
             task = in_q.get_nowait()
+            if dvfs and _dvfs_idle:
+                dvfs.stage_wakeup()
+                _dvfs_idle = False
             task_type = task.get("type", OmniStageTaskType.GENERATE)
             if task_type == OmniStageTaskType.SHUTDOWN:
                 logger.debug("Received shutdown signal")
+                if dvfs:
+                    dvfs.cleanup()
                 stage_engine.shutdown()
                 break
             elif task_type == OmniStageTaskType.ABORT:
@@ -1403,13 +1465,15 @@ async def _stage_worker_async(
                 asyncio.create_task(stage_engine.abort(rid))
             elif is_profiler_task(task_type):
                 profiler_data = await handle_profiler_task_async(task_type)
-                # Send result back to orchestrator for STOP command
                 if task_type == OmniStageTaskType.PROFILER_STOP:
                     out_q.put({"type": "profiler_result", "data": profiler_data})
             else:
                 asyncio.create_task(generation_single_request(task))
 
         except queue.Empty:
+            if dvfs and not _dvfs_idle:
+                dvfs.stage_sleep()
+                _dvfs_idle = True
             await asyncio.sleep(0.001)
         batch_request_outputs: list[Any] = []
         batch_request_ids: list[Any] = []
