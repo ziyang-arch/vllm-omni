@@ -940,8 +940,9 @@ def _stage_worker(
 
     # Batch processing loop
     while True:
+        logger.info(f"[{stage_id}] Waiting for task at {_time.time()}")
         task = in_q.get()
-
+        logger.info(f"[{stage_id}] Received task at {_time.time()}")
         _recv_dequeue_ts = _time.time()
         task_type = task.get("type", OmniStageTaskType.GENERATE)
         if task_type == OmniStageTaskType.SHUTDOWN:

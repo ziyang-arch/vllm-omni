@@ -1055,6 +1055,8 @@ class Omni(OmniBase):
         Raises:
             ValueError: If sampling_params_list is None or has incorrect length.
         """
+        #log the timestamp of the start of the generation
+        logger.info(f"[{self._name}] Generation started at {time.time()}")
         if sampling_params_list is None:
             sampling_params_list = self.default_sampling_params_list
         elif not isinstance(sampling_params_list, Sequence):
@@ -1106,6 +1108,7 @@ class Omni(OmniBase):
     ) -> Generator[OmniRequestOutput, None, None]:
         """Run generation through all stages in the pipeline."""
         logger.debug(f"[{self._name}] generate() called")
+        logger.info(f"[{self._name}] generate() called")
         if sampling_params_list is None:
             raise ValueError("sampling_params_list is required for pipelined generation")
 
@@ -1181,6 +1184,7 @@ class Omni(OmniBase):
                 "engine_inputs": prompt,
                 "sampling_params": sp0,
             }
+            logger.info(f"[{self._name}] Submitting request {req_id} to stage-0 at {time.time()}")
             self.stage_list[0].submit(task)
             _req_start_ts[req_id] = time.time()
             logger.debug(f"[{self._name}] Enqueued request {req_id} to stage-0")
@@ -1392,6 +1396,8 @@ class Omni(OmniBase):
                         continue
 
                     next_stage: OmniStage = self.stage_list[next_stage_id]
+                    #log stage name and timestamp
+                    logger.info(f"[{self._name}] Processing request {req_id} at stage {next_stage_id} at {time.time()}")
                     try:
                         # Derive inputs for the next stage, record preprocess time
                         with metrics.stage_postprocess_timer(stage_id, req_id):
@@ -1423,6 +1429,7 @@ class Omni(OmniBase):
                             next_stage_queue_submit_fn=self.stage_list[next_stage_id].submit,
                             metrics=metrics,
                         )
+                        logger.info(f"[{self._name}] Sent request {req_id} to stage-{next_stage_id} via connector at {time.time()}")
 
                     if not sent_via_connector:
                         raise RuntimeError(

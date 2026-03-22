@@ -2,6 +2,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import cloudpickle
+import time
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -256,7 +257,10 @@ class OmniLLM(LLM):
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
+            _name = type(self).__name__
+            logger.info(f"[{_name}] Running llm_engine.step at {time.time()}")
             step_outputs = self.llm_engine.step()
+            logger.info(f"[{_name}] llm_engine.step completed at {time.time()}")
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
